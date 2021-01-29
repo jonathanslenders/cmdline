@@ -5,7 +5,7 @@ from prompt_toolkit.filters import FilterOrBool, to_filter
 from prompt_toolkit.key_binding import KeyBindingsBase
 
 from .containers import Container, ScrollOffsets
-from .dimension import AnyDimension, Dimension, to_dimension
+from .dimension import AnyDimension, Dimension, sum_layout_dimensions, to_dimension
 from .mouse_handlers import MouseHandlers
 from .screen import Char, Screen, WritePosition
 
@@ -45,6 +45,7 @@ class ScrollablePane(Container):
         for performance reasons.
     :param width: When given, use this width instead of looking at the children.
     :param height: When given, use this height instead of looking at the children.
+    :param show_scrollbar: When `True` display a scrollbar on the right.
     """
 
     def __init__(
@@ -56,6 +57,10 @@ class ScrollablePane(Container):
         max_available_height: int = MAX_AVAILABLE_HEIGHT,
         width: AnyDimension = None,
         height: AnyDimension = None,
+        show_scrollbar: FilterOrBool = True,
+        display_arrows: FilterOrBool = True,
+        up_arrow_symbol: str = "^",
+        down_arrow_symbol: str = "v",
     ) -> None:
         self.content = content
         self.scroll_offsets = scroll_offsets or ScrollOffsets(top=1, bottom=1)
@@ -64,6 +69,10 @@ class ScrollablePane(Container):
         self.max_available_height = max_available_height
         self.width = width
         self.height = height
+        self.show_scrollbar = to_filter(show_scrollbar)
+        self.display_arrows = to_filter(display_arrows)
+        self.up_arrow_symbol = up_arrow_symbol
+        self.down_arrow_symbol = down_arrow_symbol
 
         self.vertical_scroll = 0
 
@@ -79,7 +88,13 @@ class ScrollablePane(Container):
 
         # We're only scrolling vertical. So the preferred width is equal to
         # that of the content.
-        return self.content.preferred_width(max_available_width)
+        content_width = self.content.preferred_width(max_available_width)
+
+        # If a scrollbar needs to be displayed, add +1 to the content width.
+        if self.show_scrollbar():
+            return sum_layout_dimensions([Dimension.exact(1), content_width])
+
+        return content_width
 
     def preferred_height(self, width: int, max_available_height: int) -> Dimension:
         if self.height is not None:
@@ -87,6 +102,10 @@ class ScrollablePane(Container):
 
         # Prefer a height large enough so that it fits all the content. If not,
         # we'll make the pane scrollable.
+        if self.show_scrollbar():
+            # If `show_scrollbar` is set. Always reserve space for the scrollbar.
+            width -= 1
+
         dimension = self.content.preferred_height(width, self.max_available_height)
 
         # Only take 'preferred' into account. Min/max can be anything.
@@ -101,11 +120,23 @@ class ScrollablePane(Container):
         erase_bg: bool,
         z_index: Optional[int],
     ) -> None:
+        """
+        Render scrollable pane content.
+
+        This works by rendering on an off-screen canvas, and copying over the
+        visible region.
+        """
+        show_scrollbar = self.show_scrollbar()
+
+        if show_scrollbar:
+            virtual_width = write_position.width - 1
+        else:
+            virtual_width = write_position.width
+
         # Compute preferred height again.
         virtual_height = self.content.preferred_height(
-            write_position.width, self.max_available_height
+            virtual_width, self.max_available_height
         ).preferred
-        virtual_width = write_position.width
 
         # Ensure virtual height is at least the available height.
         virtual_height = max(virtual_height, write_position.height)
@@ -129,8 +160,6 @@ class ScrollablePane(Container):
             z_index,
         )
         temp_screen.draw_all_floats()
-
-        # TODO: draw scrollbar?
 
         # If anything in the virtual screen is focused, move vertical scroll to
         from prompt_toolkit.application import get_app
@@ -164,14 +193,14 @@ class ScrollablePane(Container):
             ]
             zero_width_escapes = screen.zero_width_escapes[y + ypos]
 
-            for x in range(write_position.width):
+            for x in range(virtual_width):
                 row[x + xpos] = temp_row[x]
 
                 if x in temp_zero_width_escapes:
                     zero_width_escapes[x + xpos] = temp_zero_width_escapes[x]
 
         # Set screen.width/height.
-        screen.width = max(screen.width, xpos + write_position.width)
+        screen.width = max(screen.width, xpos + virtual_width)
         screen.height = max(screen.height, ypos + write_position.height)
 
         for win, write_pos in temp_screen.visible_windows_to_write_positions.items():
@@ -197,6 +226,14 @@ class ScrollablePane(Container):
         for window, point in temp_screen.menu_positions.items():
             screen.menu_positions[window] = Point(
                 x=point.x + xpos, y=point.y + ypos - self.vertical_scroll
+            )
+
+        # Draw scrollbar.
+        if show_scrollbar:
+            self._draw_scrollbar(
+                write_position,
+                virtual_height,
+                screen,
             )
 
     def is_modal(self) -> bool:
@@ -273,3 +310,76 @@ class ScrollablePane(Container):
             self.vertical_scroll = max_scroll
         if self.vertical_scroll < min_scroll:
             self.vertical_scroll = min_scroll
+
+    def _draw_scrollbar(
+        self, write_position: WritePosition, content_height: int, screen: Screen
+    ) -> None:
+        """
+        Draw the scrollbar on the screen.
+
+        Note: There is some code duplication with the `ScrollbarMargin`
+              implementation.
+        """
+
+        window_height = write_position.height
+        display_arrows = self.display_arrows()
+
+        if display_arrows:
+            window_height -= 2
+
+        try:
+            fraction_visible = write_position.height / float(content_height)
+            fraction_above = self.vertical_scroll / float(content_height)
+
+            scrollbar_height = int(
+                min(window_height, max(1, window_height * fraction_visible))
+            )
+            scrollbar_top = int(window_height * fraction_above)
+        except ZeroDivisionError:
+            return
+        else:
+
+            def is_scroll_button(row: int) -> bool:
+                " True if we should display a button on this row. "
+                return scrollbar_top <= row <= scrollbar_top + scrollbar_height
+
+            xpos = write_position.xpos + write_position.width - 1
+            ypos = write_position.ypos
+            data_buffer = screen.data_buffer
+
+            # Up arrow.
+            if display_arrows:
+                data_buffer[ypos][xpos] = Char(
+                    self.up_arrow_symbol, "class:scrollbar.arrow"
+                )
+                ypos += 1
+
+            # Scrollbar body.
+            scrollbar_background = "class:scrollbar.background"
+            scrollbar_background_start = "class:scrollbar.background,scrollbar.start"
+            scrollbar_button = "class:scrollbar.button"
+            scrollbar_button_end = "class:scrollbar.button,scrollbar.end"
+
+            for i in range(window_height):
+                style = ""
+                if is_scroll_button(i):
+                    if not is_scroll_button(i + 1):
+                        # Give the last cell a different style, because we want
+                        # to underline this.
+                        style = scrollbar_button_end
+                    else:
+                        style = scrollbar_button
+                else:
+                    if is_scroll_button(i + 1):
+                        style = scrollbar_background_start
+                    else:
+                        style = scrollbar_background
+
+                data_buffer[ypos][xpos] = Char(" ", style)
+                ypos += 1
+
+            # Down arrow
+            if display_arrows:
+                data_buffer[ypos][xpos] = Char(
+                    self.down_arrow_symbol, "class:scrollbar.arrow"
+                )
