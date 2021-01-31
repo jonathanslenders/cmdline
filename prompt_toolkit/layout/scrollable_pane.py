@@ -183,70 +183,22 @@ class ScrollablePane(Container):
             )
 
         # Copy over virtual screen and zero width escapes to real screen.
+        self._copy_over_screen(screen, temp_screen, write_position, virtual_width)
+
+        # Copy over mouse handlers.
+        self._copy_over_mouse_handlers(
+            mouse_handlers, temp_mouse_handlers, write_position, virtual_width
+        )
+
+        # Set screen.width/height.
         ypos = write_position.ypos
         xpos = write_position.xpos
 
-        for y in range(write_position.height):
-            temp_row = temp_screen.data_buffer[y + self.vertical_scroll]
-            row = screen.data_buffer[y + ypos]
-            temp_zero_width_escapes = temp_screen.zero_width_escapes[
-                y + self.vertical_scroll
-            ]
-            zero_width_escapes = screen.zero_width_escapes[y + ypos]
-
-            for x in range(virtual_width):
-                row[x + xpos] = temp_row[x]
-
-                if x in temp_zero_width_escapes:
-                    zero_width_escapes[x + xpos] = temp_zero_width_escapes[x]
-
-        # Copy over mouse handlers.
-        mouse_handlers_dict = mouse_handlers.mouse_handlers
-        temp_mouse_handlers_dict = temp_mouse_handlers.mouse_handlers
-
-        # Cache mouse handlers when wrapping them. Very often the same mouse
-        # handler is registered for many positions.
-        mouse_handler_wrappers: Dict[MouseHandler, MouseHandler] = {}
-
-        def wrap_mouse_handler(handler: MouseHandler) -> MouseHandler:
-            " Wrap mouse handler. Translate coordinates in `MouseEvent`. "
-            if handler not in mouse_handler_wrappers:
-
-                def new_handler(event: MouseEvent) -> None:
-                    new_event = MouseEvent(
-                        position=Point(
-                            x=event.position.x - xpos,
-                            y=event.position.y + self.vertical_scroll - ypos,
-                        ),
-                        event_type=event.event_type,
-                    )
-                    handler(new_event)
-
-                mouse_handler_wrappers[handler] = new_handler
-            return mouse_handler_wrappers[handler]
-
-        for y in range(write_position.height):
-            if y in temp_mouse_handlers_dict:
-                temp_mouse_row = temp_mouse_handlers_dict[y + self.vertical_scroll]
-                mouse_row = mouse_handlers_dict[y + ypos]
-                for x in range(virtual_width):
-                    if x in temp_mouse_row:
-                        mouse_row[x + xpos] = wrap_mouse_handler(temp_mouse_row[x])
-
-        # Set screen.width/height.
         screen.width = max(screen.width, xpos + virtual_width)
         screen.height = max(screen.height, ypos + write_position.height)
 
         # Copy over window write positions.
-        for win, write_pos in temp_screen.visible_windows_to_write_positions.items():
-            screen.visible_windows_to_write_positions[win] = WritePosition(
-                xpos=write_pos.xpos + xpos,
-                ypos=write_pos.ypos + ypos - self.vertical_scroll,
-                # TODO: if the window is only partly visible, then truncate width/height.
-                #       This could be important if we have nested ScrollablePanes.
-                height=write_pos.height,
-                width=write_pos.width,
-            )
+        self._copy_over_write_positions(screen, temp_screen, write_position)
 
         if temp_screen.show_cursor:
             screen.show_cursor = True
@@ -269,6 +221,101 @@ class ScrollablePane(Container):
                 write_position,
                 virtual_height,
                 screen,
+            )
+
+    def _copy_over_screen(
+        self,
+        screen: Screen,
+        temp_screen: Screen,
+        write_position: WritePosition,
+        virtual_width: int,
+    ) -> None:
+        """
+        Copy over visible screen content and "zero width escape sequences".
+        """
+        ypos = write_position.ypos
+        xpos = write_position.xpos
+
+        for y in range(write_position.height):
+            temp_row = temp_screen.data_buffer[y + self.vertical_scroll]
+            row = screen.data_buffer[y + ypos]
+            temp_zero_width_escapes = temp_screen.zero_width_escapes[
+                y + self.vertical_scroll
+            ]
+            zero_width_escapes = screen.zero_width_escapes[y + ypos]
+
+            for x in range(virtual_width):
+                row[x + xpos] = temp_row[x]
+
+                if x in temp_zero_width_escapes:
+                    zero_width_escapes[x + xpos] = temp_zero_width_escapes[x]
+
+    def _copy_over_mouse_handlers(
+        self,
+        mouse_handlers: MouseHandlers,
+        temp_mouse_handlers: MouseHandlers,
+        write_position: WritePosition,
+        virtual_width: int,
+    ) -> None:
+        """
+        Copy over mouse handlers from virtual screen to real screen.
+
+        Note: we take `virtual_width` because we don't want to copy over mouse
+              handlers that we possibly have behind the scrollbar.
+        """
+        ypos = write_position.ypos
+        xpos = write_position.xpos
+
+        # Cache mouse handlers when wrapping them. Very often the same mouse
+        # handler is registered for many positions.
+        mouse_handler_wrappers: Dict[MouseHandler, MouseHandler] = {}
+
+        def wrap_mouse_handler(handler: MouseHandler) -> MouseHandler:
+            " Wrap mouse handler. Translate coordinates in `MouseEvent`. "
+            if handler not in mouse_handler_wrappers:
+
+                def new_handler(event: MouseEvent) -> None:
+                    new_event = MouseEvent(
+                        position=Point(
+                            x=event.position.x - xpos,
+                            y=event.position.y + self.vertical_scroll - ypos,
+                        ),
+                        event_type=event.event_type,
+                    )
+                    handler(new_event)
+
+                mouse_handler_wrappers[handler] = new_handler
+            return mouse_handler_wrappers[handler]
+
+        # Copy handlers.
+        mouse_handlers_dict = mouse_handlers.mouse_handlers
+        temp_mouse_handlers_dict = temp_mouse_handlers.mouse_handlers
+
+        for y in range(write_position.height):
+            if y in temp_mouse_handlers_dict:
+                temp_mouse_row = temp_mouse_handlers_dict[y + self.vertical_scroll]
+                mouse_row = mouse_handlers_dict[y + ypos]
+                for x in range(virtual_width):
+                    if x in temp_mouse_row:
+                        mouse_row[x + xpos] = wrap_mouse_handler(temp_mouse_row[x])
+
+    def _copy_over_write_positions(
+        self, screen: Screen, temp_screen: Screen, write_position: WritePosition
+    ) -> None:
+        """
+        Copy over window write positions.
+        """
+        ypos = write_position.ypos
+        xpos = write_position.xpos
+
+        for win, write_pos in temp_screen.visible_windows_to_write_positions.items():
+            screen.visible_windows_to_write_positions[win] = WritePosition(
+                xpos=write_pos.xpos + xpos,
+                ypos=write_pos.ypos + ypos - self.vertical_scroll,
+                # TODO: if the window is only partly visible, then truncate width/height.
+                #       This could be important if we have nested ScrollablePanes.
+                height=write_pos.height,
+                width=write_pos.width,
             )
 
     def is_modal(self) -> bool:
