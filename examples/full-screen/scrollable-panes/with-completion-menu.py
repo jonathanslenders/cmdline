@@ -73,7 +73,9 @@ def main():
     kb.add("s-tab")(focus_previous)
 
     # Create and run application.
-    application = Application(layout=layout, key_bindings=kb, full_screen=True)
+    application = Application(
+        layout=layout, key_bindings=kb, full_screen=True, mouse_support=True
+    )
     application.run()
 
 
