@@ -67,8 +67,6 @@ def main():
     def exit(event) -> None:
         get_app().exit()
 
-    kb.add("n")(focus_next)
-    kb.add("p")(focus_previous)
     kb.add("tab")(focus_next)
     kb.add("s-tab")(focus_previous)
 
